@@ -252,8 +252,8 @@ class SenseAutoApiUser(HttpUser):
                                     stream=True)
 
         if response.status_code != 200:
-            logging.error(f"{self.user_id}: {response.status_code}")
-            events.request_failure.fire(
+            logging.error(f"fusion api error: {self.user_id}: {response.status_code}, prompt: {prompt}")
+            events.request.fire(
                 request_type=response.request.method,
                 name=response.request.path,
                 response_time=response.elapsed.total_seconds() * 1000,  # Convert to milliseconds
@@ -314,10 +314,7 @@ class SenseAutoApiUser(HttpUser):
     def my_request_handler(request_type, name, response_time, response_length, response,
                            context, exception, start_time, url, **kwargs):
         if exception:
-            print(f"Request to {name}:{url} failed with exception {exception}, {response.text}")
-        # else:
-        #     print(f"Successfully made a request to: {name}")
-        #     print(f"The response was {response.text}")
+            print(f"Request to {name} ({url}) failed with exception {exception}, {response.text}")
 
 if __name__ == "__main__":
     run_single_user(SenseAutoApiUser)
