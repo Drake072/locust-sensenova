@@ -4,7 +4,7 @@ import os
 import threading
 import time
 
-from locust import HttpUser, task, tag, run_single_user, constant_pacing
+from locust import HttpUser, task, tag, run_single_user, constant_pacing, events
 
 sc_token = os.environ.get('SC_TOKEN')
 fusion_token = os.environ.get('FUSION_TOKEN')
@@ -202,14 +202,18 @@ class SenseAutoApiUser(HttpUser):
     @tag("fusion", "fusion_mh")
     @task
     def invoke_fusion_mh_api(self):
+        logging.info(f"{self.user_id}: start fusion miaohua")
         prompt = "画一张向日葵"
         self.invoke_fusion_api(prompt)
+        logging.info(f"{self.user_id}: end fusion miaohua")
 
     @tag("fusion", "fusion_sc")
     @task
     def invoke_fusion_sc_api(self):
+        logging.info(f"{self.user_id}: start fusion sensechat")
         prompt = "你是谁"
         self.invoke_fusion_api(prompt)
+        logging.info(f"{self.user_id}: end fusion sensechat")
 
     def invoke_fusion_api(self, prompt: str):
         headers = {
@@ -244,57 +248,76 @@ class SenseAutoApiUser(HttpUser):
         first_char_arrival_time = None
 
         res_delta_list = []
-        with self.client.post('/fusion/v1/chat-with-image', json=json_payload, headers=headers,
-                              stream=True) as streaming_response:
-            status_code = streaming_response.status_code
-            res_headers = streaming_response.headers
-            json_response_body = None
-            if streaming_response.headers.get("Content-Type").startswith("text/event-stream"):
-                for data in streaming_response.iter_lines():
-                    if data:
-                        data_str = data.decode('utf-8')
-                        sse_str = data_str[len('data: '):]
+        response = self.client.post('/fusion/v1/chat-with-image', json=json_payload, headers=headers,
+                                    stream=True)
 
-                        if str(sse_str).find("[DONE]") != -1:
-                            logging.error("Not expecting '[DONE]' in fusion API")
-                        else:
-                            sse = json.loads(data_str[len('data: '):])
-                            finish_reason_str = sse.get("data", {}).get('choices', [{}])[0].get("finish_reason", "")
+        if response.status_code != 200:
+            logging.error(f"{self.user_id}: {response.status_code}")
+            events.request_failure.fire(
+                request_type=response.request.method,
+                name=response.request.path,
+                response_time=response.elapsed.total_seconds() * 1000,  # Convert to milliseconds
+                exception=None,
+                response=response,
+            )
 
-                            if finish_reason_str is not "" and finish_reason is None:
-                                finish_reason = finish_reason_str
+        status_code = response.status_code
+        res_headers = response.headers
+        json_response_body = None
+        if response.headers.get("Content-Type").startswith("text/event-stream"):
+            for data in response.iter_lines():
+                if data:
+                    data_str = data.decode('utf-8')
+                    sse_str = data_str[len('data: '):]
 
-                            delta_str = sse.get("data", {}).get('choices', [{}])[0].get("delta", "")
+                    if str(sse_str).find("[DONE]") != -1:
+                        logging.error("Not expecting '[DONE]' in fusion API")
+                    else:
+                        sse = json.loads(data_str[len('data: '):])
+                        finish_reason_str = sse.get("data", {}).get('choices', [{}])[0].get("finish_reason", "")
 
-                            if first_char_arrival_time is None:
-                                if delta_str.strip() is not "":
-                                    first_char_arrival_time = time.time()
-                                else:
-                                    continue
-                            res_delta_list.append(delta_str)
-            else:
-                json_response_body = streaming_response.json()
-                logging.info(json_response_body)
+                        if finish_reason_str is not "" and finish_reason is None:
+                            finish_reason = finish_reason_str
 
-            request_end_time = time.time()
-            test_result = {
-                'method': 'fusion',
-                'prompt': prompt,
-                'user_id': self.user_id,
-                "request_start": request_start_time,
-                "request_end": request_end_time,
-                "elapse_time_in_ms": None if request_end_time is None else int(
-                    (request_end_time - request_start_time) * 1000),
-                'first_char_arrival_time': first_char_arrival_time,
-                'first_char_delay_in_ms': None if first_char_arrival_time is None else int(
-                    (first_char_arrival_time - request_start_time) * 1000),
-                'status': status_code,
-                'headers': res_headers,
-                'body': json_response_body,
-                'finish_reason': finish_reason,
-                'res_message': ''.join(res_delta_list)}
-            logging.info(test_result)
+                        delta_str = sse.get("data", {}).get('choices', [{}])[0].get("delta", "")
 
+                        if first_char_arrival_time is None:
+                            if delta_str.strip() is not "":
+                                first_char_arrival_time = time.time()
+                            else:
+                                continue
+                        res_delta_list.append(delta_str)
+        else:
+            json_response_body = response.json()
+            logging.info(json_response_body)
+
+        request_end_time = time.time()
+        test_result = {
+            'method': 'fusion',
+            'prompt': prompt,
+            'user_id': self.user_id,
+            "request_start": request_start_time,
+            "request_end": request_end_time,
+            "elapse_time_in_ms": None if request_end_time is None else int(
+                (request_end_time - request_start_time) * 1000),
+            'first_char_arrival_time': first_char_arrival_time,
+            'first_char_delay_in_ms': None if first_char_arrival_time is None else int(
+                (first_char_arrival_time - request_start_time) * 1000),
+            'status': status_code,
+            'headers': res_headers,
+            'body': json_response_body,
+            'finish_reason': finish_reason,
+            'res_message': ''.join(res_delta_list)}
+        logging.info(test_result)
+
+    @events.request.add_listener
+    def my_request_handler(request_type, name, response_time, response_length, response,
+                           context, exception, start_time, url, **kwargs):
+        if exception:
+            print(f"Request to {name}:{url} failed with exception {exception}, {response.text}")
+        # else:
+        #     print(f"Successfully made a request to: {name}")
+        #     print(f"The response was {response.text}")
 
 if __name__ == "__main__":
     run_single_user(SenseAutoApiUser)
