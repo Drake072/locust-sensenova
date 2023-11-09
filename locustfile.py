@@ -4,7 +4,7 @@ import os
 import threading
 import time
 
-from locust import HttpUser, between, task, tag, run_single_user
+from locust import HttpUser, task, tag, run_single_user, constant_pacing
 
 sc_token = os.environ.get('SC_TOKEN')
 fusion_token = os.environ.get('FUSION_TOKEN')
@@ -12,13 +12,14 @@ mh_token = os.environ.get('MH_TOKEN')
 
 
 class SenseAutoApiUser(HttpUser):
-    wait_time = between(0.0, 0.5)
+    wait_time = constant_pacing(1)
 
     user_counter = 0
     counter_lock = threading.Lock()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.miaohua_task_id = None
         with SenseAutoApiUser.counter_lock:
             SenseAutoApiUser.user_counter += 1
             self.user_id = SenseAutoApiUser.user_counter
@@ -31,6 +32,8 @@ class SenseAutoApiUser(HttpUser):
 
         request_end_time = time.time()
         test_result = {
+            'method': 'health_check',
+            'prompt': None,
             'user_id': self.user_id,
             "request_start": request_start_time,
             "request_end": request_end_time,
@@ -97,6 +100,8 @@ class SenseAutoApiUser(HttpUser):
                 logging.info(json_response_body)
 
             test_result = {
+                'method': 'sc_streaming',
+                'prompt': prompt,
                 'user_id': self.user_id,
                 "request_start": request_start_time,
                 "request_end": request_end_time,
@@ -111,6 +116,88 @@ class SenseAutoApiUser(HttpUser):
                 'finish_reason': finish_reason,
                 'res_message': ''.join(res_delta_list)}
             logging.info(test_result)
+
+    @tag("miaohua")
+    @task
+    def miaohua_api(self):
+        if self.miaohua_task_id is None:
+            self.miaohua_task_submission()
+        else:
+            self.miaohua_task_result()
+
+    def miaohua_task_result(self):
+        if self.miaohua_task_id is None:
+            return
+
+        headers = {
+            'Content-Type': 'application/json',
+        }
+        json_payload = {
+            "token": mh_token,
+            "task_id": self.miaohua_task_id
+        }
+        request_start_time = time.time()
+        response = self.client.post('/miaohua/api/v1b/task_result', json=json_payload, headers=headers)
+        request_end_time = time.time()
+        test_result = {
+            'method': 'mh_task_result',
+            'prompt': None,
+            'user_id': self.user_id,
+            "request_start": request_start_time,
+            "request_end": request_end_time,
+            "elapse_time_in_ms": None if request_end_time is None else int(
+                (request_end_time - request_start_time) * 1000),
+            'first_char_arrival_time': None,
+            'first_char_delay_in_ms': None,
+            'status': response.status_code,
+            'headers': response.headers,
+            'body': response.json(),
+            'finish_reason': None,
+            'res_message': None}
+        if response.status_code == 200 and len(response.json().get('info', {}).get('images', [])) != 0:
+            self.miaohua_task_id = None
+        logging.info(test_result)
+
+    def miaohua_task_submission(self):
+        prompt = "画个台灯"
+        headers = {
+            'Content-Type': 'application/json',
+        }
+        json_payload = {
+            "token": mh_token,
+            "model_name": "Artist v0.3.5 Beta",
+            "prompt": prompt,
+            "n_images": 1,
+            "scale": 7,
+            "strength": 0.6,
+            "ddim_steps": 20,
+            "output_size": "992x560",
+            "add_prompt": False
+        }
+        request_start_time = time.time()
+        response = self.client.post('/miaohua/api/v1b/task_submit', json=json_payload, headers=headers)
+        request_end_time = time.time()
+        test_result = {
+            'method': 'mh_task_submit',
+            'prompt': prompt,
+            'user_id': self.user_id,
+            "request_start": request_start_time,
+            "request_end": request_end_time,
+            "elapse_time_in_ms": None if request_end_time is None else int(
+                (request_end_time - request_start_time) * 1000),
+            'first_char_arrival_time': None,
+            'first_char_delay_in_ms': None,
+            'status': response.status_code,
+            'headers': response.headers,
+            'body': response.json(),
+            'finish_reason': None,
+            'res_message': None}
+        if response.status_code == 200:
+            task_id = response.json().get('info', {}).get('task_id', None)
+            if task_id is not None:
+                self.miaohua_task_id = task_id
+                logging.info("Task ID" + task_id)
+        logging.info(test_result)
 
     @tag("fusion", "fusion_mh")
     @task
@@ -191,6 +278,8 @@ class SenseAutoApiUser(HttpUser):
 
             request_end_time = time.time()
             test_result = {
+                'method': 'fusion',
+                'prompt': prompt,
                 'user_id': self.user_id,
                 "request_start": request_start_time,
                 "request_end": request_end_time,
