@@ -6,7 +6,9 @@ import time
 
 from locust import HttpUser, between, task, tag, run_single_user
 
-auth_token = os.environ.get('LOAD_TEST_TOKEN')
+sc_token = os.environ.get('SC_TOKEN')
+fusion_token = os.environ.get('FUSION_TOKEN')
+mh_token = os.environ.get('MH_TOKEN')
 
 
 class SenseAutoApiUser(HttpUser):
@@ -41,17 +43,17 @@ class SenseAutoApiUser(HttpUser):
     @tag("sense_chat")
     @task
     def sense_chat_streaming_response(self):
-        question = "你是谁"
+        prompt = "你是谁"
         headers = {
             'Content-Type': 'application/json',
-            'Authorization': auth_token
+            'Authorization': sc_token
         }
         json_payload = {
             "model": "nova-ptc-xl-v1",
             "messages": [
                 {
                     "role": "user",
-                    "content": question
+                    "content": prompt
                 }
             ],
             "stream": True
@@ -94,6 +96,100 @@ class SenseAutoApiUser(HttpUser):
                 json_response_body = streaming_response.json()
                 logging.info(json_response_body)
 
+            test_result = {
+                'user_id': self.user_id,
+                "request_start": request_start_time,
+                "request_end": request_end_time,
+                "elapse_time_in_ms": None if request_end_time is None else int(
+                    (request_end_time - request_start_time) * 1000),
+                'first_char_arrival_time': first_char_arrival_time,
+                'first_char_delay_in_ms': None if first_char_arrival_time is None else int(
+                    (first_char_arrival_time - request_start_time) * 1000),
+                'status': status_code,
+                'headers': res_headers,
+                'body': json_response_body,
+                'finish_reason': finish_reason,
+                'res_message': ''.join(res_delta_list)}
+            logging.info(test_result)
+
+    @tag("fusion", "fusion_mh")
+    @task
+    def invoke_fusion_mh_api(self):
+        prompt = "画一张向日葵"
+        self.invoke_fusion_api(prompt)
+
+    @tag("fusion", "fusion_sc")
+    @task
+    def invoke_fusion_sc_api(self):
+        prompt = "你是谁"
+        self.invoke_fusion_api(prompt)
+
+    def invoke_fusion_api(self, prompt: str):
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': fusion_token
+        }
+        json_payload = {
+            "max_new_tokens": 512,
+            "messages": [
+                {
+                    "content": prompt,
+                    "role": "user"
+                }
+            ],
+            "mh_controlnet_model": "",
+            "mh_key": mh_token,
+            "mh_model_name": "Artist V0.3.0 Beta",
+            "mh_output_size": "960x960",
+            "mh_scale": 7,
+            "mh_select_seed": 0,
+            "mh_ddim_steps": 30,
+            "mh_add_prompt": False,
+            "repetition_penalty": 1,
+            "output_img": True,
+            "stream": True,
+            "temperature": 0.8,
+            "top_p": 0.7,
+            "user_id": "string"
+        }
+        request_start_time = time.time()
+        finish_reason = None
+        first_char_arrival_time = None
+
+        res_delta_list = []
+        with self.client.post('/fusion/v1/chat-with-image', json=json_payload, headers=headers,
+                              stream=True) as streaming_response:
+            status_code = streaming_response.status_code
+            res_headers = streaming_response.headers
+            json_response_body = None
+            if streaming_response.headers.get("Content-Type").startswith("text/event-stream"):
+                for data in streaming_response.iter_lines():
+                    if data:
+                        data_str = data.decode('utf-8')
+                        sse_str = data_str[len('data: '):]
+
+                        if str(sse_str).find("[DONE]") != -1:
+                            logging.error("Not expecting '[DONE]' in fusion API")
+                        else:
+                            sse = json.loads(data_str[len('data: '):])
+                            finish_reason_str = sse.get("data", {}).get('choices', [{}])[0].get("finish_reason", "")
+
+                            if finish_reason_str is not "" and finish_reason is None:
+                                finish_reason = finish_reason_str
+
+                            delta_str = sse.get("data", {}).get('choices', [{}])[0].get("delta", "")
+
+                            if first_char_arrival_time is None:
+                                if delta_str.strip() is not "":
+                                    first_char_arrival_time = time.time()
+                                else:
+                                    continue
+                            res_delta_list.append(delta_str)
+            else:
+                json_response_body = streaming_response.json()
+                logging.info(json_response_body)
+
+            request_end_time = time.time()
             test_result = {
                 'user_id': self.user_id,
                 "request_start": request_start_time,
